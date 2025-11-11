@@ -1,19 +1,11 @@
 import fetch from "node-fetch";
 
-// 30.472811, -81.907228 270 
-
-//  INPUT 
-const INITIAL_POINT = { lat: 30.472811, lon: -81.907228 };
-const BEARING_DEG   = 200;          // degrees (0 degrees = north)
-const DISTANCE_M    = 50;            // metres to extrapolate
-
-
-const MAX_BEARING_DIFF_SAME_ROAD = 30;   // degrees – skip API if change ≤ this
-const MAX_BEARING_DIFF_SNAP      = 45;   // degrees – allowed tolerance when snapping
-const INITIAL_RADIUS = 50;               // metres – start search radius
-const MAX_RADIUS     = 300;              // metres – safety limit
-const EARTH_RADIUS   = 6371e3;           // metres
-
+const DISTANCE_M = 50;
+const MAX_BEARING_DIFF_SAME_ROAD = 30;
+const MAX_BEARING_DIFF_SNAP = 45;
+const INITIAL_RADIUS = 50;
+const MAX_RADIUS = 300;
+const EARTH_RADIUS = 6371e3;
 
 
 function extrapolate(lat, lon, bearingDeg, distanceMeters) {
@@ -25,40 +17,33 @@ function extrapolate(lat, lon, bearingDeg, distanceMeters) {
 
   const lat2 = Math.asin(
     Math.sin(lat1) * Math.cos(distanceMeters / R) +
-    Math.cos(lat1) * Math.sin(distanceMeters / R) * Math.cos(brng)
+      Math.cos(lat1) * Math.sin(distanceMeters / R) * Math.cos(brng)
   );
 
-  const lon2 = lon1 + Math.atan2(
-    Math.sin(brng) * Math.sin(distanceMeters / R) * Math.cos(lat1),
-    Math.cos(distanceMeters / R) - Math.sin(lat1) * Math.sin(lat2)
-  );
+  const lon2 =
+    lon1 +
+    Math.atan2(
+      Math.sin(brng) * Math.sin(distanceMeters / R) * Math.cos(lat1),
+      Math.cos(distanceMeters / R) - Math.sin(lat1) * Math.sin(lat2)
+    );
 
   return {
     lat: lat2 * 180 / Math.PI,
-    lon: lon2 * 180 / Math.PI
+    lon: lon2 * 180 / Math.PI,
   };
-}
-
-
-function haversine(lat1, lon1, lat2, lon2) {
-  const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
-  const Δφ = (lat2 - lat1) * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
-  return EARTH_RADIUS * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
 function bearing(lat1, lon1, lat2, lon2) {
   const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
   const λ1 = lon1 * Math.PI / 180, λ2 = lon2 * Math.PI / 180;
-  const y = Math.sin(λ2-λ1) * Math.cos(φ2);
-  const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(λ2-λ1);
+  const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
   const θ = Math.atan2(y, x);
-  return (θ * 180 / Math.PI + 360) % 360;
+  return ((θ * 180) / Math.PI + 360) % 360;
 }
 
 function angleDiff(a, b) {
-  let d = (b - a + 180) % 360 - 180;
+  let d = ((b - a + 180) % 360) - 180;
   if (d <= -180) d += 360;
   if (d > 180) d -= 360;
   return d;
@@ -68,17 +53,16 @@ function angleDiff(a, b) {
 function getOnewayDirection(way) {
   const t = way.tags || {};
   const oneway = t.oneway;
-  const roundabout = t.junction === 'roundabout';
+  const roundabout = t.junction === "roundabout";
 
-  if (roundabout || oneway === 'yes' || oneway === '1' || oneway === 'true') {
+  if (roundabout || oneway === "yes" || oneway === "1" || oneway === "true") {
     return { isOneway: true, forward: true, reverse: false };
   }
-  if (oneway === '-1' || oneway === 'reverse') {
+  if (oneway === "-1" || oneway === "reverse") {
     return { isOneway: true, forward: false, reverse: true };
   }
   return { isOneway: false, forward: true, reverse: true };
 }
-
 
 function distanceToSegment(px, py, ax, ay, bx, by) {
   const A = px - ax, B = py - ay;
@@ -86,8 +70,8 @@ function distanceToSegment(px, py, ax, ay, bx, by) {
   const dot = A * C + B * D;
   const lenSq = C * C + D * D;
   let param = lenSq !== 0 ? dot / lenSq : -1;
-
   let xx, yy;
+
   if (param < 0) { xx = ax; yy = ay; }
   else if (param > 1) { xx = bx; yy = by; }
   else { xx = ax + param * C; yy = ay + param * D; }
@@ -102,31 +86,67 @@ async function queryWaysAround(lat, lon, radius) {
     [out:json][timeout:30];
     way(around:${radius},${lat},${lon})[highway];
     out geom tags;
-  `;
-  const resp = await fetch("https://overpass-api.de/api/interpreter", {
+  `.trim();
+
+  const body = `data=${encodeURIComponent(ql)}`;
+  const url = "https://overpass-api.de/api/interpreter";
+
+  console.log(`\n[Overpass] QUERY`);
+  console.log(`   URL: ${url}`);
+  console.log(`   Radius: ${radius}m`);
+  console.log(`   Point: ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+  console.log(`   Body: ${body.substring(0, 120)}${body.length > 120 ? '...' : ''}`);
+
+  const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `data=${encodeURIComponent(ql)}`
+    body,
   });
-  if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
+
+  if (!resp.ok) {
+    console.error(`[Overpass] HTTP ${resp.status} ${resp.statusText}`);
+    throw new Error(`Overpass ${resp.status}`);
+  }
+
   const data = await resp.json();
-  return data.elements.filter(e => e.geometry && e.geometry.length >= 2 && e.tags);
+  const ways = data.elements.filter(e => e.geometry && e.geometry.length >= 2 && e.tags);
+
+  console.log(`[Overpass] RESPONSE: ${ways.length} valid way(s) found`);
+  if (ways.length > 0) {
+    const ids = ways.slice(0, 5).map(w => w.id).join(', ');
+    console.log(`   First way IDs: ${ids}${ways.length > 5 ? '...' : ''}`);
+  }
+
+  return ways;
 }
 
 
 async function snapToNearestRoadWithDirection(
-  origLat, origLon, origBearingDeg,
-  distanceMeters = 50,
+  origLat,
+  origLon,
+  origBearingDeg,
+  distanceMeters = DISTANCE_M,
   startRadius = INITIAL_RADIUS
 ) {
+  // 1. Log input
+  console.log(`\n[Input] Original point`);
+  console.log(`   Lat: ${origLat.toFixed(6)}`);
+  console.log(`   Lon: ${origLon.toFixed(6)}`);
+  console.log(`   Bearing: ${origBearingDeg.toFixed(1)}°`);
 
+  // 2. Extrapolate
   const extr = extrapolate(origLat, origLon, origBearingDeg, distanceMeters);
   const extrBearing = bearing(origLat, origLon, extr.lat, extr.lon);
   const bearingChange = Math.abs(angleDiff(origBearingDeg, extrBearing));
 
+  console.log(`[Extrapolation] 50m ahead (reverse bearing)`);
+  console.log(`   Extrapolated: ${extr.lat.toFixed(6)}, ${extr.lon.toFixed(6)}`);
+  console.log(`   New bearing: ${extrBearing.toFixed(1)}°`);
+  console.log(`   Bearing change: ${bearingChange.toFixed(1)}°`);
 
+  // 3. Same-road shortcut
   if (bearingChange <= MAX_BEARING_DIFF_SAME_ROAD) {
-    console.log(`Bearing change ${bearingChange.toFixed(1)} degrees → still on same road (no API).`);
+    console.log(`[Snap] Bearing change ≤ ${MAX_BEARING_DIFF_SAME_ROAD}° → using extrapolated point (no API)`);
     return {
       lat: extr.lat,
       lon: extr.lon,
@@ -136,12 +156,11 @@ async function snapToNearestRoadWithDirection(
       radiusUsed: 0,
       method: "same_road_no_api",
       oneway: null,
-      wayName: null
+      wayName: null,
     };
   }
 
-  console.log(`Bearing change ${bearingChange.toFixed(1)} degrees → querying Overpass...`);
-
+  console.log(`[Snap] Bearing change > ${MAX_BEARING_DIFF_SAME_ROAD}° → querying Overpass...`);
 
   let radius = startRadius;
   let best = null;
@@ -149,101 +168,83 @@ async function snapToNearestRoadWithDirection(
   while (radius <= MAX_RADIUS) {
     const ways = await queryWaysAround(extr.lat, extr.lon, radius);
     if (!ways.length) {
+      console.log(`   No ways in ${radius}m → increasing radius...`);
       radius = Math.min(MAX_RADIUS, radius * 1.5);
       continue;
     }
 
     for (const way of ways) {
       const dir = getOnewayDirection(way);
-
-      
       for (let i = 0; i < way.geometry.length - 1; i++) {
         const a = way.geometry[i];
         const b = way.geometry[i + 1];
         const segBearing = bearing(a.lat, a.lon, b.lat, b.lon);
         const revBearing = (segBearing + 180) % 360;
 
-        if (dir.forward) {
-          const diff = Math.abs(angleDiff(origBearingDeg, segBearing));
-          if (diff <= MAX_BEARING_DIFF_SNAP) {
-            const d = distanceToSegment(extr.lat, extr.lon, a.lat, a.lon, b.lat, b.lon);
-            if (!best || d.distance < best.distance) {
-              const proj = d.projection;
-              best = {
-                lat: a.lat + (b.lat - a.lat) * proj,
-                lon: a.lon + (b.lon - a.lon) * proj,
-                distance: d.distance,
-                wayId: way.id,
-                bearing: segBearing,
-                radiusUsed: radius,
-                method: "overpass_snap",
-                oneway: dir.isOneway ? (dir.forward ? "forward" : "reverse") : "bidirectional",
-                wayName: way.tags.name || way.tags.ref || null
-              };
-            }
-          }
-        }
+        const check = (segB, label) => {
+          const diff = Math.abs(angleDiff(origBearingDeg, segB));
+          if (diff > MAX_BEARING_DIFF_SNAP) return;
 
-        if (dir.reverse) {
-          const diff = Math.abs(angleDiff(origBearingDeg, revBearing));
-          if (diff <= MAX_BEARING_DIFF_SNAP) {
-            const d = distanceToSegment(extr.lat, extr.lon, a.lat, a.lon, b.lat, b.lon);
-            if (!best || d.distance < best.distance) {
-              const proj = d.projection;
-              best = {
-                lat: a.lat + (b.lat - a.lat) * proj,
-                lon: a.lon + (b.lon - a.lon) * proj,
-                distance: d.distance,
-                wayId: way.id,
-                bearing: revBearing,
-                radiusUsed: radius,
-                method: "overpass_snap",
-                oneway: "reverse",
-                wayName: way.tags.name || way.tags.ref || null
-              };
-            }
+          const d = distanceToSegment(extr.lat, extr.lon, a.lat, a.lon, b.lat, b.lon);
+          if (!best || d.distance < best.distance) {
+            const proj = d.projection;
+            best = {
+              lat: a.lat + (b.lat - a.lat) * proj,
+              lon: a.lon + (b.lon - a.lon) * proj,
+              distance: d.distance,
+              wayId: way.id,
+              bearing: segB,
+              radiusUsed: radius,
+              method: "overpass_snap",
+              oneway: dir.isOneway
+                ? (dir.forward && label === 'forward') || (dir.reverse && label === 'reverse')
+                  ? label
+                  : "reverse"
+                : "bidirectional",
+              wayName: way.tags.name || way.tags.ref || null,
+            };
           }
-        }
+        };
+
+        if (dir.forward) check(segBearing, 'forward');
+        if (dir.reverse) check(revBearing, 'reverse');
       }
     }
 
-    if (best) break;               // found a good segment
+    if (best) break;
     radius = Math.min(MAX_RADIUS, radius * 1.5);
   }
 
   if (!best) {
-    console.log("No road segment matching direction (one-way aware) found.");
-    return null;
+    console.log(`[Snap] No matching road found in ${MAX_RADIUS}m → using extrapolated point`);
+    return {
+      lat: extr.lat,
+      lon: extr.lon,
+      distance: 0,
+      wayId: null,
+      bearing: extrBearing,
+      radiusUsed: 0,
+      method: "fallback_extrapolation",
+      oneway: null,
+      wayName: null,
+    };
   }
 
-  console.log(`Snapped to way ${best.wayId} [${best.oneway}] – bearing ${best.bearing.toFixed(1)} degrees`);
+  console.log(`[Snap] SUCCESS`);
+  console.log(`   Way ID: ${best.wayId}`);
+  console.log(`   Oneway: ${best.oneway}`);
+  console.log(`   Road name: ${best.wayName || '(none)'}`);
+  console.log(`   Snapped point: ${best.lat.toFixed(6)}, ${best.lon.toFixed(6)}`);
+  console.log(`   Distance from extrapolated: ${best.distance.toFixed(2)}m`);
+  console.log(`   Final bearing: ${best.bearing.toFixed(1)}°`);
+  console.log(`   Search radius used: ${best.radiusUsed}m`);
+
   return best;
 }
 
-
-(async () => {
-  console.log(`Starting extrapolation from (${INITIAL_POINT.lat}, ${INITIAL_POINT.lon})...`);
-  const extrapolated = extrapolate(INITIAL_POINT.lat, INITIAL_POINT.lon, BEARING_DEG, DISTANCE_M);
-  console.log(`Extrapolated point: ${extrapolated.lat.toFixed(6)}, ${extrapolated.lon.toFixed(6)}`);
-
-  const snapped = await snapToNearestRoadWithDirection(
-    INITIAL_POINT.lat,
-    INITIAL_POINT.lon,
-    BEARING_DEG,
-    DISTANCE_M,
-    INITIAL_RADIUS
-  );
-
-  if (snapped) {
-    if (snapped.method === "same_road_no_api") {
-      console.log(`Same-road shortcut – using extrapolated point directly.`);
-    } else {
-      console.log(`Snapped to nearest road: ${snapped.lat.toFixed(6)}, ${snapped.lon.toFixed(6)}`);
-      console.log(`Distance from extrapolated: ${snapped.distance.toFixed(2)} meters`);
-      console.log(`Road bearing: ${snapped.bearing.toFixed(1)} degrees  (oneway: ${snapped.oneway})`);
-      if (snapped.wayName) console.log(`Road name/ref: ${snapped.wayName}`);
-    }
-  } else {
-    console.log("No nearby road found for snapping.");
-  }
-})();
+export {
+  snapToNearestRoadWithDirection,
+  extrapolate,
+  bearing,
+  angleDiff,
+};

@@ -1,3 +1,4 @@
+// database.js
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 
@@ -12,21 +13,42 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+async function callFunction(funcName, params = []) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO public');
+
+    const placeholders = params.map((_, i) => `$${i + 1}`).join(', ');
+    const query = `SELECT * FROM ${funcName}(${placeholders})`;
+
+    const result = await client.query(query, params);
+    await client.query('COMMIT');
+    return result.rows; // returns array of rows
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(`Error in function ${funcName}:`, err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function callProcedure(procName, params = []) {
   const client = await pool.connect();
   try {
-    console.log('Executing function with params:', params);
-    // Set search_path to public
+    await client.query('BEGIN');
     await client.query('SET search_path TO public');
-    const result = await client.query(
-      `SELECT * FROM ${procName}($1)`,
-      [params[0]]
-    );
+
+    const placeholders = params.map((_, i) => `$${i + 1}`).join(', ');
+    const query = `CALL ${procName}(${placeholders})`;
+
+    await client.query(query, params);
     await client.query('COMMIT');
-    return result.rows;
+    return true; // no return value
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(`Error executing function ${procName}:`, err);
+    console.error(`Error in procedure ${procName}:`, err);
     throw err;
   } finally {
     client.release();
@@ -35,5 +57,6 @@ async function callProcedure(procName, params = []) {
 
 export default {
   pool,
+  func: callFunction,
   proc: callProcedure
 };
