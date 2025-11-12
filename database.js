@@ -24,7 +24,7 @@ async function callFunction(funcName, params = []) {
 
     const result = await client.query(query, params);
     await client.query('COMMIT');
-    return result.rows; // returns array of rows
+    return result.rows; 
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(`Error in function ${funcName}:`, err);
@@ -45,7 +45,7 @@ async function callProcedure(procName, params = []) {
 
     await client.query(query, params);
     await client.query('COMMIT');
-    return true; // no return value
+    return true; 
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(`Error in procedure ${procName}:`, err);
