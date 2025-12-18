@@ -559,7 +559,7 @@ class OverrideHandler {
 
 const overrideHandler = new OverrideHandler();
 
-export default function registerRoutes(server) {
+export default function registerOverrideRoutes(server) {
   server.post('/api/create-cluster-override', overrideHandler.createClusterOverride.bind(overrideHandler));
   server.post('/api/create-adas-override', overrideHandler.createAdasOverride.bind(overrideHandler));
   server.post('/api/create-stop-override', overrideHandler.createStopOverride.bind(overrideHandler));
