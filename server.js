@@ -1,7 +1,7 @@
 // server.js
 import restify from 'restify';
 import dotenv from 'dotenv';
-import registerOverrideRoutes from './routes/overrideController.js';
+import registerOverrideRoutes from './controller/overrideController.js';
 import { Pool } from 'pg';
 import os from 'os';  
 import logger, { rawAccessLogger } from './logger.js';  
