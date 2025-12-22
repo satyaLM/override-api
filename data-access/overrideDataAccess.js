@@ -7,8 +7,8 @@ class OverrideDAO {
     return await db.func("get_batch_cluster_data_v2", [clusterObjs]);
   }
 
-  async writeBatchOverrides(overrideArray) {
-    const jsonArray = overrideArray.map(o => JSON.stringify(o));
+  async writeBatchClusterOverrides(overrideArray) {
+    const jsonArray = overrideArray.map(clusters => JSON.stringify(clusters));
     return await db.proc('write_batch_overrides', [jsonArray]);
   }
 

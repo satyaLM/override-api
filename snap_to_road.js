@@ -1,262 +1,350 @@
-import fetch from "node-fetch";
+// snap_to_road.js
+import fetch from 'node-fetch';
 import logger from './logger.js';
 
-const DISTANCE_M = process.env.SNAP_EXTRAPOLATE_DISTANCE_M ? parseFloat(process.env.SNAP_EXTRAPOLATE_DISTANCE_M) : 10;
-const BEARING_TOLERANCE = process.env.BEARING_TOLERANCE ? parseFloat(process.env.BEARING_TOLERANCE) : 45;
-const INITIAL_RADIUS = process.env.INITIAL_RADIUS ? parseFloat(process.env.INITIAL_RADIUS) : 50;
-const MAX_RADIUS = process.env.MAX_RADIUS ? parseFloat(process.env.MAX_RADIUS) : 100;
-const EARTH_RADIUS = process.env.EARTH_RADIUS ? parseFloat(process.env.EARTH_RADIUS) : 6371e3;
-const USA_NGROK_API = process.env.USA_NGROK_API;
-const OVERPASS_API = process.env.OVERPASS_API;
+// Configuration constants (configurable via env)
+const CONFIG = {
+  EXTRAPOLATE_DISTANCE_M: process.env.SNAP_EXTRAPOLATE_DISTANCE_M
+    ? parseFloat(process.env.SNAP_EXTRAPOLATE_DISTANCE_M)
+    : 50,
+  BEARING_TOLERANCE_DEG: process.env.BEARING_TOLERANCE
+    ? parseFloat(process.env.BEARING_TOLERANCE)
+    : 45,
+  INITIAL_SEARCH_RADIUS_M: process.env.INITIAL_RADIUS
+    ? parseFloat(process.env.INITIAL_RADIUS)
+    : 50,
+  MAX_SEARCH_RADIUS_M: process.env.MAX_RADIUS
+    ? parseFloat(process.env.MAX_RADIUS)
+    : 100,
+  EARTH_RADIUS_M: process.env.EARTH_RADIUS
+    ? parseFloat(process.env.EARTH_RADIUS)
+    : 6371e3,
+  FETCH_TIMEOUT_MS: 15000,
+  OVERPASS_RETRY_DELAY_MS: 2000,
+  RADIUS_GROWTH_FACTOR: 1.5,
+};
 
-function bearing(lat1, lon1, lat2, lon2) {
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
+const API = {
+  USA_LOCAL_SERVER: process.env.USA_NGROK_API,
+  OVERPASS: process.env.OVERPASS_API,
+};
+
+// === Utility Math Functions ===
+export function bearing(lat1, lon1, lat2, lon2) {
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+
   const y = Math.sin(Δλ) * Math.cos(φ2);
   const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
   const θ = Math.atan2(y, x);
+
   return (θ * 180 / Math.PI + 360) % 360;
 }
 
-function angleDiff(a, b) {
-  let diff = Math.abs(((b - a + 180) % 360) - 180);
-  if (diff > 180) diff = 360 - diff;
-  return diff;
+export function angleDiff(deg1, deg2) {
+  let diff = Math.abs(((deg2 - deg1 + 180) % 360) - 180);
+  return diff <= 180 ? diff : 360 - diff;
 }
 
-function extrapolate(lat, lon, bearingDeg, distance = DISTANCE_M) {
-  const R = EARTH_RADIUS;
-  const reverseBearing = (bearingDeg - 180 + 360) % 360;
-  const brng = reverseBearing * Math.PI / 180;
-  const lat1 = lat * Math.PI / 180;
-  const lon1 = lon * Math.PI / 180;
-  const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(distance / R) +
-    Math.cos(lat1) * Math.sin(distance / R) * Math.cos(brng)
+export function extrapolate(lat, lon, bearingDeg, distanceM = CONFIG.EXTRAPOLATE_DISTANCE_M) {
+  const R = CONFIG.EARTH_RADIUS_M;
+  const reverseBearingRad = ((bearingDeg - 180 + 360) % 360) * Math.PI / 180;
+
+  const lat1Rad = (lat * Math.PI) / 180;
+  const lon1Rad = (lon * Math.PI) / 180;
+
+  const lat2Rad = Math.asin(
+    Math.sin(lat1Rad) * Math.cos(distanceM / R) +
+    Math.cos(lat1Rad) * Math.sin(distanceM / R) * Math.cos(reverseBearingRad)
   );
-  const lon2 = lon1 + Math.atan2(
-    Math.sin(brng) * Math.sin(distance / R) * Math.cos(lat1),
-    Math.cos(distance / R) - Math.sin(lat1) * Math.sin(lat2)
-  );
-  return { lat: lat2 * 180 / Math.PI, lon: lon2 * 180 / Math.PI };
+
+  const lon2Rad =
+    lon1Rad +
+    Math.atan2(
+      Math.sin(reverseBearingRad) * Math.sin(distanceM / R) * Math.cos(lat1Rad),
+      Math.cos(distanceM / R) - Math.sin(lat1Rad) * Math.sin(lat2Rad)
+    );
+
+  return {
+    lat: (lat2Rad * 180) / Math.PI,
+    lon: (lon2Rad * 180) / Math.PI,
+  };
 }
 
 function distanceToSegment(px, py, ax, ay, bx, by) {
-  const A = px - ax, B = py - ay;
-  const C = bx - ax, D = by - ay;
+  const A = px - ax;
+  const B = py - ay;
+  const C = bx - ax;
+  const D = by - ay;
+
   const dot = A * C + B * D;
   const lenSq = C * C + D * D;
   let param = lenSq !== 0 ? dot / lenSq : -1;
-  let xx, yy;
-  if (param < 0) { xx = ax; yy = ay; }
-  else if (param > 1) { xx = bx; yy = by; }
-  else { xx = ax + param * C; yy = ay + param * D; }
-  return { distance: Math.hypot(px - xx, py - yy), projection: Math.max(0, Math.min(1, param)) };
+
+  let closestX, closestY;
+  if (param < 0) {
+    closestX = ax;
+    closestY = ay;
+  } else if (param > 1) {
+    closestX = bx;
+    closestY = by;
+  } else {
+    closestX = ax + param * C;
+    closestY = ay + param * D;
+  }
+
+  const distance = Math.hypot(px - closestX, py - closestY);
+  const projection = Math.max(0, Math.min(1, param));
+
+  return { distance, projection, closestX, closestY };
 }
 
-function getOnewayDirection(way) {
-  const t = way.tags || {};
-  const oneway = t.oneway;
-  const roundabout = t.junction === "roundabout";
-  if (roundabout || oneway === "yes" || oneway === "1" || oneway === "true") {
+function getOnewayDirection(tags = {}) {
+  const oneway = tags.oneway;
+  const isRoundabout = tags.junction === 'roundabout';
+
+  if (isRoundabout || oneway === 'yes' || oneway === '1' || oneway === 'true') {
     return { forward: true, reverse: false };
   }
-  if (oneway === "-1" || oneway === "reverse") {
+  if (oneway === '-1' || oneway === 'reverse') {
     return { forward: false, reverse: true };
   }
   return { forward: true, reverse: true };
 }
 
-async function snapUSAProgressive(lat, lon, bearingDeg) {
-  let radius = INITIAL_RADIUS;
-  let best = null;
-  logger.info(`[USA API] Starting progressive search`);
-  while (radius <= MAX_RADIUS && !best) {
-    const url = `${USA_NGROK_API}?lat=${lat.toFixed(8)}&lon=${lon.toFixed(8)}&bearing=${bearingDeg.toFixed(1)}&radius=${radius}`;
-    logger.info(`[USA API] Trying radius=${radius.toFixed(1)}m → ${url}`);
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-      const resp = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (resp.status === 404 || resp.status === 504 || resp.status === 429 || resp.status === 408 || !resp.ok) {
-        logger.info(`[USA API] ${resp.status} → falling back to Overpass API`);
-        return null;  // Trigger fallback
-      } else {
-        const data = await resp.json();
-        if (data && data.lat && data.lon) {
-          logger.snap(`[USA API] Snapped at ${radius.toFixed(1)}m → ${data.lat.toFixed(6)}, ${data.lon.toFixed(6)}`);
-          best = {
-            lat: data.lat,
-            lon: data.lon,
-            roadBearing: data.bearing || bearingDeg,
-            wayId: data.way_id || null,
-            wayName: data.way_name || null,
-            radiusUsed: radius,
-          };
-          break;
-        } else {
-          logger.info(`[USA API] No snap at ${radius.toFixed(1)}m → falling back to Overpass API`);
-          return null;  
-        }
-      }
-    } catch (err) {
-      logger.error(`[USA API] Error: ${err.message} → falling back to Overpass API`);
-      return null;  
-    }
+// === API Snapping Functions ===
+async function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
   }
-  return best;
 }
 
-async function snapOverpass(extrLat, extrLon) {
-  let radius = INITIAL_RADIUS;
-  let best = null;
-  logger.info(`[Overpass] Starting progressive search`);
-  while (radius <= MAX_RADIUS && !best) {
-    const ql = `[out:json][timeout:30];way(around:${radius},${extrLat},${extrLon})[highway];out geom tags;`;
-    logger.info(`[Overpass] Searching ${radius.toFixed(1)}m around ${extrLat.toFixed(6)}, ${extrLon.toFixed(6)}`);
-    let shouldRetry = false;
+async function snapViaLocalServer(targetLat, targetLon, vehicleBearingDeg) {
+  let radius = CONFIG.INITIAL_SEARCH_RADIUS_M;
+
+  logger.info('[LocalServer] Starting progressive search for nearest road');
+
+  while (radius <= CONFIG.MAX_SEARCH_RADIUS_M) {
+    const url = `${API.USA_LOCAL_SERVER}?lat=${targetLat.toFixed(8)}&lon=${targetLon.toFixed(8)}&bearing=${vehicleBearingDeg.toFixed(1)}&radius=${radius}`;
+
+    logger.info(`[LocalServer] Trying radius=${radius.toFixed(1)}m`);
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-      const resp = await fetch(OVERPASS_API, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: `data=${encodeURIComponent(ql)}`,
-        signal: controller.signal
+      const response = await fetchWithTimeout(url);
+
+      if (!response.ok) {
+        if ([404, 504, 429, 408].includes(response.status)) {
+          logger.info(`[LocalServer] HTTP ${response.status} → falling back to Overpass`);
+          return null;
+        }
+        logger.warn(`[LocalServer] Unexpected status ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data?.lat && data?.lon) {
+        logger.snap(`[LocalServer] SUCCESS at ${radius}m → (${data.lat.toFixed(6)}, ${data.lon.toFixed(6)})`);
+        return {
+          lat: data.lat,
+          lon: data.lon,
+          roadBearing: data.bearing ?? vehicleBearingDeg,
+          wayId: data.way_id ?? null,
+          wayName: data.way_name ?? null,
+          radiusUsed: radius,
+          source: 'local_server',
+        };
+      }
+
+      logger.info(`[LocalServer] No result at ${radius}m → trying larger radius`);
+    } catch (error) {
+      logger.error(`[LocalServer] Request failed: ${error.message}`);
+      return null; // Always fallback on any error
+    }
+
+    radius *= CONFIG.RADIUS_GROWTH_FACTOR;
+  }
+
+  logger.info('[LocalServer] Max radius reached without result → fallback');
+  return null;
+}
+
+async function snapViaOverpass(targetLat, targetLon) {
+  let radius = CONFIG.INITIAL_SEARCH_RADIUS_M;
+  let bestMatch = null;
+
+  logger.info('[Overpass] Starting progressive road search');
+
+  while (radius <= CONFIG.MAX_SEARCH_RADIUS_M && !bestMatch) {
+    const overpassQuery = `[out:json][timeout:30];
+    way(around:${radius},${targetLat.toFixed(8)},${targetLon.toFixed(8)})[highway];
+    out geom tags;`;
+
+    logger.info(`[Overpass] Querying roads within ${radius.toFixed(1)}m`);
+
+    let shouldContinue = true;
+
+    try {
+      const response = await fetchWithTimeout(API.OVERPASS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(overpassQuery)}`,
       });
-      clearTimeout(timeoutId);
-      if (resp.status === 504 || resp.status === 429 || resp.status === 408 || !resp.ok) {
-        logger.warn(`[Overpass] ${resp.status} → retrying after 2s...`);
-        shouldRetry = true;
+
+      if (!response.ok) {
+        logger.warn(`[Overpass] HTTP ${response.status} → retrying`);
+        shouldContinue = true;
       } else {
-        const data = await resp.json();
-        const ways = data.elements.filter(w => w.geometry && w.geometry.length >= 2 && w.tags);
+        const { elements } = await response.json();
+        const ways = elements.filter((w) => w.type === 'way' && w.geometry?.length >= 2 && w.tags);
+
         if (ways.length === 0) {
-          logger.info(`[Overpass] No roads in ${radius.toFixed(1)}m → increasing radius`);
-          shouldRetry = true;
+          logger.info(`[Overpass] No highways found in ${radius}m → increasing radius`);
+          shouldContinue = true;
         } else {
-          logger.success(`[Overpass] Found ${ways.length} road(s) in ${radius.toFixed(1)}m → snapping...`);
+          logger.success(`[Overpass] Found ${ways.length} road(s) → evaluating segments`);
+
           for (const way of ways) {
-            const dir = getOnewayDirection(way);
-            for (let i = 0; i < way.geometry.length - 1; i++) {
-              const a = way.geometry[i];
-              const b = way.geometry[i + 1];
-              const segBearing = bearing(a.lat, a.lon, b.lat, b.lon);
-              const candidates = [];
-              if (dir.forward) candidates.push(segBearing);
-              if (dir.reverse) candidates.push((segBearing + 180) % 360);
-              for (const roadBearing of candidates) {
-                const d = distanceToSegment(extrLat, extrLon, a.lat, a.lon, b.lat, b.lon);
-                if (!best || d.distance < best.distance) {
-                  const proj = d.projection;
-                  best = {
-                    lat: a.lat + (b.lat - a.lat) * proj,
-                    lon: a.lon + (b.lon - a.lon) * proj,
-                    distance: d.distance,
+            const direction = getOnewayDirection(way.tags);
+            const segments = way.geometry;
+
+            for (let i = 0; i < segments.length - 1; i++) {
+              const start = segments[i];
+              const end = segments[i + 1];
+              const segmentBearing = bearing(start.lat, start.lon, end.lat, end.lon);
+
+              const candidateBearings = [];
+              if (direction.forward) candidateBearings.push(segmentBearing);
+              if (direction.reverse) candidateBearings.push((segmentBearing + 180) % 360);
+
+              for (const roadBearing of candidateBearings) {
+                const { distance, projection, closestX, closestY } = distanceToSegment(
+                  targetLat,
+                  targetLon,
+                  start.lat,
+                  start.lon,
+                  end.lat,
+                  end.lon
+                );
+
+                if (!bestMatch || distance < bestMatch.distance) {
+                  bestMatch = {
+                    lat: closestX,
+                    lon: closestY,
+                    distance,
                     roadBearing,
                     wayId: way.id,
                     wayName: way.tags.name || way.tags.ref || null,
                     radiusUsed: radius,
+                    source: 'overpass',
                   };
                 }
               }
             }
           }
-          if (best) {
-            logger.snap(`[Overpass] Snapped at ${radius.toFixed(1)}m → ${best.lat.toFixed(6)}, ${best.lon.toFixed(6)}`);
+
+          if (bestMatch) {
+            logger.snap(`[Overpass] Best snap at ${radius}m → (${bestMatch.lat.toFixed(6)}, ${bestMatch.lon.toFixed(6)})`);
             break;
           } else {
-            logger.info(`[Overpass] No valid bearing match in ${radius.toFixed(1)}m → increasing radius`);
-            shouldRetry = true;
+            logger.info(`[Overpass] No suitable bearing match → increasing radius`);
+            shouldContinue = true;
           }
         }
       }
-    } catch (err) {
-      logger.warn(`[Overpass] ${err.name === 'AbortError' ? 'Timeout' : 'Error'}: ${err.message} → retrying`);
-      shouldRetry = true;
+    } catch (error) {
+      logger.warn(`[Overpass] ${error.name === 'AbortError' ? 'Timeout' : 'Error'}: ${error.message}`);
+      shouldContinue = true;
     }
-    if (shouldRetry) {
-      await new Promise(r => setTimeout(r, 2000));
-      const nextRadius = radius * 1.5;
-      if (nextRadius > MAX_RADIUS) {
-        logger.warn(`[Overpass] MAX_RADIUS=${MAX_RADIUS}m reached → stopping`);
+
+    if (shouldContinue) {
+      await new Promise((resolve) => setTimeout(resolve, CONFIG.OVERPASS_RETRY_DELAY_MS));
+      radius *= CONFIG.RADIUS_GROWTH_FACTOR;
+      if (radius > CONFIG.MAX_SEARCH_RADIUS_M) {
+        logger.warn(`[Overpass] Max radius reached (${CONFIG.MAX_SEARCH_RADIUS_M}m)`);
         break;
       }
-      radius = nextRadius;
     }
   }
-  if (!best) {
-    logger.info(`[Overpass] No snap found within ${MAX_RADIUS}m → using extrapolated point`);
-  }
-  return best;
+
+  return bestMatch;
 }
 
-export async function snapToNearestRoadWithDirection(cluster) {
-  const { cluster_id, lat: origLat, lon: origLon, bearing: origBearingDeg, country_code_iso3 } = cluster;
-  logger.info(`Requested for:  [${cluster_id}] | country: ${country_code_iso3} |latitude & longitude: ${origLat.toFixed(6)}, ${origLon.toFixed(6)} | bearing: ${origBearingDeg.toFixed(1)}°`);
-  const extr = extrapolate(origLat, origLon, origBearingDeg);
-  logger.info(` Extrapolated latitude & longitude:  ${extr.lat.toFixed(6)}, ${extr.lon.toFixed(6)}`);
-  let bestSnap = null;
+// === Main Export ===
+export async function snapToNearestRoadWithDirection({ cluster_id, lat: origLat, lon: origLon, bearing: origBearingDeg, country_code_iso3 }) {
+  logger.info(
+    `[Snap Request] ID: ${cluster_id} | Country: ${country_code_iso3} | Pos: (${origLat.toFixed(6)}, ${origLon.toFixed(6)}) | Bearing: ${origBearingDeg.toFixed(1)}°`
+  );
+
+  const extrapolatedPoint = extrapolate(origLat, origLon, origBearingDeg);
+  logger.info(`[Extrapolated] → (${extrapolatedPoint.lat.toFixed(6)}, ${extrapolatedPoint.lon.toFixed(6)})`);
+
+  let snapResult = null;
+
+  // Decide which snapping strategy to use
   if (country_code_iso3 === 'USA' || country_code_iso3 === 'US') {
-    bestSnap = await snapUSAProgressive(extr.lat, extr.lon, origBearingDeg);
-    if (!bestSnap) {
-      logger.info(`[USA API] Fallback triggered → switching to Overpass API`);
-      bestSnap = await snapOverpass(extr.lat, extr.lon);
+    snapResult = await snapViaLocalServer(extrapolatedPoint.lat, extrapolatedPoint.lon, origBearingDeg);
+    if (!snapResult) {
+      logger.info('[Fallback] Local server failed → using Overpass');
+      snapResult = await snapViaOverpass(extrapolatedPoint.lat, extrapolatedPoint.lon);
     }
   } else {
-    bestSnap = await snapOverpass(extr.lat, extr.lon);
+    snapResult = await snapViaOverpass(extrapolatedPoint.lat, extrapolatedPoint.lon);
   }
-  let result;
-  if (!bestSnap) {
-    result = {
+
+  // Final decision: accept snap or fall back to extrapolated point
+  if (!snapResult) {
+    const result = {
       cluster_id,
-      original_lat: origLat,    
-      original_lon: origLon,     
-      lat: extr.lat,
-      lon: extr.lon,
+      original_lat: origLat,
+      original_lon: origLon,
+      lat: extrapolatedPoint.lat,
+      lon: extrapolatedPoint.lon,
       bearing: origBearingDeg,
-      method: "extrapolated_no_snap",
-      message: `No snap point found for ${cluster_id} → using extrapolated point`,
+      method: 'extrapolated_no_snap',
+      message: `No road found within ${CONFIG.MAX_SEARCH_RADIUS_M}m → using extrapolated point`,
     };
-    logger.info(`[Result] ${result.message}`);
-    logger.info(` **FINAL POINT**: ${result.lat.toFixed(6)}, ${result.lon.toFixed(6)} (extrapolated)`);
-  } else {
-    const snapBearing = bestSnap.roadBearing || origBearingDeg;
-    const bearingDiff = angleDiff(origBearingDeg, snapBearing);
-    if (bearingDiff <= BEARING_TOLERANCE) {
-      result = {
-        cluster_id,
-        original_lat: origLat,    
-        original_lon: origLon,
-        lat: bestSnap.lat,
-        lon: bestSnap.lon,
-        bearing: snapBearing,
-        method: "snapped_accepted",
-        message: `Snapped to road for id: ${cluster_id} (bearing: ${snapBearing.toFixed(1)}°, diff: ${bearingDiff.toFixed(1)}°)`,
-        way_id: bestSnap.wayId || null,
-        way_name: bestSnap.wayName || null,
-      };
-      logger.info(`[Result] ${result.message}`);
-      logger.info(` **FINAL SNAPPED POINT**: ${result.lat.toFixed(6)}, ${result.lon.toFixed(6)}`);
-    } else {
-      result = {
-        cluster_id,
-        original_lat: origLat,    
-        original_lon: origLon,
-        lat: extr.lat,
-        lon: extr.lon,
-        bearing: origBearingDeg,
-        method: "bearing_rejected",
-        message: `Bearing mismatch ${bearingDiff.toFixed(1)}° > ±45° for id: ${cluster_id} → using extrapolated point`,
-      };
-      logger.info(`[Result] ${result.message}`);
-      logger.info(` **FINAL POINT**: ${result.lat.toFixed(6)}, ${result.lon.toFixed(6)} (extrapolated)`);
-    }
+    logger.info(`[FINAL] ${result.message}`);
+    return result;
   }
-  return result;
+
+  const bearingDiff = angleDiff(origBearingDeg, snapResult.roadBearing);
+
+  if (bearingDiff <= CONFIG.BEARING_TOLERANCE_DEG) {
+    const result = {
+      cluster_id,
+      original_lat: origLat,
+      original_lon: origLon,
+      lat: snapResult.lat,
+      lon: snapResult.lon,
+      bearing: snapResult.roadBearing,
+      way_id: snapResult.wayId,
+      way_name: snapResult.wayName,
+      method: 'snapped_accepted',
+      message: `Snapped successfully (bearing diff: ${bearingDiff.toFixed(1)}°)`,
+    };
+    logger.info(`[FINAL] ${result.message} → (${result.lat.toFixed(6)}, ${result.lon.toFixed(6)})`);
+    return result;
+  } else {
+    const result = {
+      cluster_id,
+      original_lat: origLat,
+      original_lon: origLon,
+      lat: extrapolatedPoint.lat,
+      lon: extrapolatedPoint.lon,
+      bearing: origBearingDeg,
+      method: 'bearing_rejected',
+      message: `Bearing mismatch (${bearingDiff.toFixed(1)}° > ±${CONFIG.BEARING_TOLERANCE_DEG}°) → using extrapolated point`,
+    };
+    logger.info(`[FINAL] ${result.message}`);
+    return result;
+  }
 }
-
-export { extrapolate, bearing, angleDiff };
-
